@@ -1,10 +1,12 @@
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from lighteval.metrics.metrics_sample import SampleLevelComputation
 from lighteval.metrics.utils.metric_utils import SampleLevelMetric
 from lighteval.models.model_output import ModelResponse
+from lighteval.tasks.lighteval_task import LightevalTaskConfig
 from lighteval.tasks.requests import Doc, SamplingMethod
 
 logger = logging.getLogger(__name__)
@@ -120,3 +122,29 @@ hungarian_math_metric: SampleLevelMetric = SampleLevelMetric(
     sample_level_fn=HungarianMathEquivalence(),
     corpus_level_fn=aggregate_scores,
 )
+
+TASKS_TABLE: Dict[str, LightevalTaskConfig] = {}
+
+_DATA_DIR = Path(os.environ.get("HUMATURA_DATA_DIR", "./data"))
+
+try:
+    _discovered_files = discover_local_datasets(_DATA_DIR)
+except NotADirectoryError:
+    logger.warning("Data directory %s not found. Tasks will be registered without local files.", _DATA_DIR)
+    _discovered_files = {"emelt": [], "kozep": []}
+
+for subset in ["emelt", "kozep"]:
+    task_name: str = f"hungarian_math:{subset}"
+
+    TASKS_TABLE[task_name] = LightevalTaskConfig(
+        name=task_name,
+        prompt_function=hungarian_math_prompt_fn,
+        hf_repo="json",
+        hf_subset=subset,
+        metrics=[hungarian_math_metric],
+        hf_data_files=_discovered_files if _discovered_files else None,
+        hf_avail_splits=["train"],
+        evaluation_splits=["train"],
+        few_shots_split=None,
+        few_shots_select=None,
+    )
