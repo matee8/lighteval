@@ -136,19 +136,20 @@ except NotADirectoryError:
     _discovered_files = {"emelt": [], "közép": []}
 
 for subset in ["emelt", "közép"]:
-    task_name: str = f"humatura:{subset}"
+    all_files_for_subset = _discovered_files.get(subset, [])
+
+    if not all_files_for_subset:
+        continue
 
     TASKS_TABLE.append(
         LightevalTaskConfig(
-            name=task_name,
+            name=f"humatura:{subset}",
             prompt_function=hungarian_math_prompt_fn,
             hf_repo="json",
-            hf_subset=subset,
+            hf_subset="default",
+            hf_data_files={"validation": all_files_for_subset}, 
+            hf_avail_splits=["validation"],
+            evaluation_splits=["validation"],
             metrics=[hungarian_math_metric],
-            hf_data_files=_discovered_files if _discovered_files else None,
-            hf_avail_splits=["train"],
-            evaluation_splits=["train"],
-            few_shots_split=None,
-            few_shots_select=None,
         )
     )
