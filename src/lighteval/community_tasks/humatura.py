@@ -18,23 +18,23 @@ def discover_local_datasets(data_dir: Path) -> Dict[str, List[str]]:
     if not data_dir.is_dir():
         raise NotADirectoryError(f"Dataset directory does not exist or is not a directory: {data_dir}")
 
-    data_files: Dict[str, List[str]] = {"emelt": [], "közép": []}
+    data_files: Dict[str, List[str]] = {"emelt": [], "kozep": []}
 
     for file_path in data_dir.glob("*.json"):
         file_name = file_path.stem.lower()
         if "emelt" in file_name:
             data_files["emelt"].append(str(file_path.absolute()))
         elif "közép" in file_name:
-            data_files["közép"].append(str(file_path.absolute()))
+            data_files["kozep"].append(str(file_path.absolute()))
         else:
-            logger.warning("File %s does not match emelt or közép subsets. Skipping.", file_path)
+            logger.warning("File %s does not match emelt or kozep subsets. Skipping.", file_path)
 
     # Since I create the datasets earlier, it could be left empty, which is not compatible with
     # LightEval.
     data_files = {subset: paths for subset, paths in data_files.items() if paths}
 
     if not data_files:
-        logger.warning("No emelt or közép JSON dataset files found in %s.", data_dir)
+        logger.warning("No emelt or kozep JSON dataset files found in %s.", data_dir)
 
     return data_files
 
@@ -133,9 +133,9 @@ try:
     _discovered_files = discover_local_datasets(_DATA_DIR)
 except NotADirectoryError:
     logger.warning("Data directory %s not found. Tasks will be registered without local files.", _DATA_DIR)
-    _discovered_files = {"emelt": [], "közép": []}
+    _discovered_files = {"emelt": [], "kozep": []}
 
-for subset in ["emelt", "közép"]:
+for subset in ["emelt", "kozep"]:
     all_files_for_subset = _discovered_files.get(subset, [])
 
     if not all_files_for_subset:
