@@ -1,8 +1,11 @@
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from lighteval.tasks.requests import Doc
+from lighteval.metrics.metrics_sample import SampleLevelComputation
+from lighteval.metrics.utils.metric_utils import SampleLevelMetric
+from lighteval.models.model_output import ModelResponse
+from lighteval.tasks.requests import Doc, SamplingMethod
 
 logger = logging.getLogger(__name__)
 
@@ -50,3 +53,70 @@ def hungarian_math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
         gold_index=[],
         specific={"solution": line["solution"]["solution"]},
     )
+
+
+def extract_boxed_answer(text: str) -> Optional[str]:
+    box_tag = "\\boxed{"
+    start_idx = text.find(box_tag)
+
+    if start_idx == -1:
+        return None
+
+    start_idx += len(box_tag)
+    brace_count = 1
+
+    for i in range(start_idx, len(text)):
+        if text[i] == "{":
+            brace_count += 1
+        elif text[i] == "}":
+            brace_count -= 1
+
+        if brace_count == 0:
+            return text[start_idx:i]
+
+    return None
+
+
+class HungarianMathEquivalence(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response: ModelResponse, **kwargs: Any) -> Dict[str, float]:
+        if not model_response.final_text:
+            return {"math_equivalence": 0.0}
+
+        if doc.specific is None or "solution" not in doc.specific:
+            logger.debug("Formatted doc is missing the specific solution dictionary.")
+            return {"math_equivalence": 0.0}
+
+        prediction = model_response.final_text[0]
+        extracted_pred = extract_boxed_answer(prediction)
+
+        if extracted_pred is None:
+            logger.debug("Failed to extract boxed answer from prediction.")
+            return {"math_equivalence": 0.0}
+
+        solution_dict: Any = doc.specific["solution"]
+        if not isinstance(solution_dict, dict):
+            return {"math_equivalence": 0.0}
+
+        gold_answer: str = solution_dict.get("final-answer", "").strip("$")
+
+        pred_clean: str = extracted_pred.replace(" ", "").lower()
+        gold_clean: str = gold_answer.replace(" ", "").lower()
+
+        score: float = 1.0 if pred_clean == gold_clean else 0.0
+
+        return {"math_equivalence": score}
+
+
+def aggregate_scores(scores: List[float]) -> float:
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
+
+
+hungarian_math_metric: SampleLevelMetric = SampleLevelMetric(
+    metric_name="hungarian_math_final_answer",
+    higher_is_better=True,
+    category=SamplingMethod.GENERATIVE,
+    sample_level_fn=HungarianMathEquivalence(),
+    corpus_level_fn=aggregate_scores,
+)
