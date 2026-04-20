@@ -11,28 +11,30 @@ from lighteval.tasks.requests import Doc, SamplingMethod
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["TASKS_TABLE"]
+
 
 def discover_local_datasets(data_dir: Path) -> Dict[str, List[str]]:
     if not data_dir.is_dir():
         raise NotADirectoryError(f"Dataset directory does not exist or is not a directory: {data_dir}")
 
-    data_files: Dict[str, List[str]] = {"emelt": [], "kozep": []}
+    data_files: Dict[str, List[str]] = {"emelt": [], "közép": []}
 
     for file_path in data_dir.glob("*.json"):
         file_name = file_path.stem.lower()
         if "emelt" in file_name:
             data_files["emelt"].append(str(file_path.absolute()))
-        elif "kozep" in file_name:
-            data_files["kozep"].append(str(file_path.absolute()))
+        elif "közép" in file_name:
+            data_files["közép"].append(str(file_path.absolute()))
         else:
-            logger.warning("File %s does not match emelt or kozep subsets. Skipping.", file_path)
+            logger.warning("File %s does not match emelt or közép subsets. Skipping.", file_path)
 
     # Since I create the datasets earlier, it could be left empty, which is not compatible with
     # LightEval.
     data_files = {subset: paths for subset, paths in data_files.items() if paths}
 
     if not data_files:
-        logger.warning("No emelt or kozep JSON dataset files found in %s.", data_dir)
+        logger.warning("No emelt or közép JSON dataset files found in %s.", data_dir)
 
     return data_files
 
@@ -123,7 +125,7 @@ hungarian_math_metric: SampleLevelMetric = SampleLevelMetric(
     corpus_level_fn=aggregate_scores,
 )
 
-TASKS_TABLE: Dict[str, LightevalTaskConfig] = {}
+TASKS_TABLE: List[LightevalTaskConfig] = []
 
 _DATA_DIR = Path(os.environ.get("HUMATURA_DATA_DIR", "./data"))
 
@@ -131,20 +133,22 @@ try:
     _discovered_files = discover_local_datasets(_DATA_DIR)
 except NotADirectoryError:
     logger.warning("Data directory %s not found. Tasks will be registered without local files.", _DATA_DIR)
-    _discovered_files = {"emelt": [], "kozep": []}
+    _discovered_files = {"emelt": [], "közép": []}
 
-for subset in ["emelt", "kozep"]:
-    task_name: str = f"hungarian_math:{subset}"
+for subset in ["emelt", "közép"]:
+    task_name: str = f"humatura:{subset}"
 
-    TASKS_TABLE[task_name] = LightevalTaskConfig(
-        name=task_name,
-        prompt_function=hungarian_math_prompt_fn,
-        hf_repo="json",
-        hf_subset=subset,
-        metrics=[hungarian_math_metric],
-        hf_data_files=_discovered_files if _discovered_files else None,
-        hf_avail_splits=["train"],
-        evaluation_splits=["train"],
-        few_shots_split=None,
-        few_shots_select=None,
+    TASKS_TABLE.append(
+        LightevalTaskConfig(
+            name=task_name,
+            prompt_function=hungarian_math_prompt_fn,
+            hf_repo="json",
+            hf_subset=subset,
+            metrics=[hungarian_math_metric],
+            hf_data_files=_discovered_files if _discovered_files else None,
+            hf_avail_splits=["train"],
+            evaluation_splits=["train"],
+            few_shots_split=None,
+            few_shots_select=None,
+        )
     )
