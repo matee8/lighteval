@@ -147,7 +147,7 @@ for subset in ["emelt", "közép"]:
             prompt_function=hungarian_math_prompt_fn,
             hf_repo="json",
             hf_subset="default",
-            hf_data_files={"validation": all_files_for_subset}, 
+            hf_data_files={"validation": all_files_for_subset},
             hf_avail_splits=["validation"],
             evaluation_splits=["validation"],
             metrics=[hungarian_math_metric],
