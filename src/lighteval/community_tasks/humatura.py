@@ -111,9 +111,14 @@ class HungarianMathEquivalence(SampleLevelComputation):
         return {"math_equivalence": score}
 
 
-def aggregate_scores(scores: List[float]) -> float:
+def aggregate_scores(scores: List[Any]) -> float:
     if not scores:
         return 0.0
+
+    if isinstance(scores[0], dict):
+        unpacked_scores = [s.get("math_equivalence", 0.0) for s in scores]
+        return sum(unpacked_scores) / len(unpacked_scores)
+
     return sum(scores) / len(scores)
 
 
