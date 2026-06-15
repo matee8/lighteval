@@ -3,7 +3,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from lighteval.metrics.metrics_sample import SampleLevelComputation
 from lighteval.metrics.utils.metric_utils import SampleLevelMetric
@@ -102,7 +102,7 @@ def preprocess_datasets(data_files: Dict[str, List[str]]) -> Dict[str, List[str]
     return preprocessed_files
 
 
-def hungarian_math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
+def math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     instruction = (
         "Kérlek, oldd meg a következő matematikai feladatot. "
         "Gondoljuk végig lépésről lépésre, részletesen. "
@@ -113,7 +113,7 @@ def hungarian_math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     description: str = line.get("description", "")
     query = f"{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n"
 
-    first_solution = line["solutions"][0]
+    first_solution = line.get("solutions", [{}])[0]
     solution_obj = first_solution.get("solution", first_solution)
 
     return Doc(
@@ -122,6 +122,52 @@ def hungarian_math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
         choices=[],
         gold_index=[],
         specific={"solution": solution_obj},
+    )
+
+
+def physics_part1_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
+    instruction = (
+        "Kérlek, válaszolj a következő feleletválasztós fizika feladatra. "
+        "A végső válaszod betűjelét (A, B, C vagy D) pontosan egy \\boxed{} formátumba írd be "
+        "(például \\boxed{A} vagy \\boxed{C})."
+    )
+
+    description: str = line.get("description", "")
+
+    first_solution = line.get("solutions", [{}])[0]
+    answers: Dict[str, str] = first_solution.get("answers", {})
+    correct_answer: str = first_solution.get("correct_answer", "")
+
+    choices_text = "\n".join(f"{letter}) {text}" for letter, text in answers.items())
+
+    query = f"{instruction}\n\nFeladat:\n{description}\n\nVálaszlehetőségek:\n{choices_text}\n\nMegoldás:\n"
+
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[],
+        gold_index=[],
+        specific={"correct_answer": correct_answer},
+    )
+
+
+def physics_part2_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
+    instruction = (
+        "Kérlek, oldd meg a következő fizika feladatot. "
+        "Gondoljuk végig lépésről lépésre, részletesen, és add meg a végső választ."
+    )
+
+    description: str = line.get("description", "")
+    query = f"{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n"
+
+    solutions = [sol.get("solution", sol) for sol in line.get("solutions", [])]
+
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[],
+        gold_index=[],
+        specific={"solutions": solutions},
     )
 
 
@@ -196,6 +242,12 @@ hungarian_math_metric: SampleLevelMetric = SampleLevelMetric(
     corpus_level_fn=aggregate_scores,
 )
 
+_PROMPT_FNS: Dict[str, Callable[[Dict[str, Any], str], Doc]] = {
+    "math": math_prompt_fn,
+    "physics_part1": physics_part1_prompt_fn,
+    "physics_part2": physics_part2_prompt_fn,
+}
+
 TASKS_TABLE: List[LightevalTaskConfig] = []
 
 _DATA_DIR = Path(os.environ.get("HUMATURA_DATA_DIR", "./data"))
@@ -214,10 +266,12 @@ for task_key, all_files_for_subset in _discovered_files.items():
     subject, level = task_key.rsplit("_", 1)
     task_name = f"humatura:{subject}:{level}"
 
+    prompt_fn = _PROMPT_FNS.get(subject, math_prompt_fn)
+
     TASKS_TABLE.append(
         LightevalTaskConfig(
             name=task_name,
-            prompt_function=hungarian_math_prompt_fn,
+            prompt_function=prompt_fn,
             hf_repo="json",
             hf_subset="default",
             hf_data_files={"validation": all_files_for_subset},
