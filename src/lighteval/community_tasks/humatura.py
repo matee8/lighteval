@@ -15,10 +15,13 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["TASKS_TABLE"]
 
+_MOCK_JUDGE_WARNING_SHOWN = False
+
 
 def discover_local_datasets(data_dir: Path) -> Dict[str, List[str]]:
     if not data_dir.is_dir():
-        raise NotADirectoryError(f"Dataset directory does not exist or is not a directory: {data_dir}")
+        raise NotADirectoryError("Dataset directory does not exist or is not a directory: "
+                                 f"{data_dir}")
 
     data_files: Dict[str, List[str]] = {}
 
@@ -113,15 +116,14 @@ def math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     description: str = line.get("description", "")
     query = f"{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n"
 
-    first_solution = line.get("solutions", [{}])[0]
-    solution_obj = first_solution.get("solution", first_solution)
+    solutions = [sol.get("solution", sol) for sol in line.get("solutions", [])]
 
     return Doc(
         task_name=task_name,
         query=query,
         choices=[],
         gold_index=[],
-        specific={"solution": solution_obj},
+        specific={"solutions": solutions},
     )
 
 
@@ -140,7 +142,8 @@ def physics_part1_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
 
     choices_text = "\n".join(f"{letter}) {text}" for letter, text in answers.items())
 
-    query = f"{instruction}\n\nFeladat:\n{description}\n\nVálaszlehetőségek:\n{choices_text}\n\nMegoldás:\n"
+    query = (f"{instruction}\n\nFeladat:\n{description}\n\n"
+            f"Válaszlehetőségek:\n{choices_text}\n\nMegoldás:\n")
 
     return Doc(
         task_name=task_name,
@@ -193,36 +196,6 @@ def extract_boxed_answer(text: str) -> Optional[str]:
     return None
 
 
-class HungarianMathEquivalence(SampleLevelComputation):
-    def compute(self, doc: Doc, model_response: ModelResponse, **kwargs: Any) -> Dict[str, float]:
-        if not model_response.final_text:
-            return {"math_equivalence": 0.0}
-
-        if doc.specific is None or "solution" not in doc.specific:
-            logger.debug("Formatted doc is missing the specific solution dictionary.")
-            return {"math_equivalence": 0.0}
-
-        prediction = model_response.final_text[0]
-        extracted_pred = extract_boxed_answer(prediction)
-
-        if extracted_pred is None:
-            logger.debug("Failed to extract boxed answer from prediction.")
-            return {"math_equivalence": 0.0}
-
-        solution_dict: Any = doc.specific["solution"]
-        if not isinstance(solution_dict, dict):
-            return {"math_equivalence": 0.0}
-
-        gold_answer: str = solution_dict.get("final-answer", "").strip("$")
-
-        pred_clean: str = extracted_pred.replace(" ", "").lower()
-        gold_clean: str = gold_answer.replace(" ", "").lower()
-
-        score: float = 1.0 if pred_clean == gold_clean else 0.0
-
-        return {"math_equivalence": score}
-
-
 class PhysicsMultipleChoiceMatch(SampleLevelComputation):
     def compute(self, doc: Doc, model_response: ModelResponse, **kwargs: Any) -> Dict[str, float]:
         if not model_response.final_text:
@@ -247,35 +220,69 @@ class PhysicsMultipleChoiceMatch(SampleLevelComputation):
         return {"exact_match": score}
 
 
-def aggregate_scores(scores: List[Any]) -> float:
-    if not scores:
-        return 0.0
+def mock_llm_judge(query: str, prediction: str, solutions: List[Any]) -> bool:
+    global _MOCK_JUDGE_WARNING_SHOWN
+    if not _MOCK_JUDGE_WARNING_SHOWN:
+        logger.warning("Using MOCK LLM Judge. "
+                       "Replace mock_llm_judge with actual LLM implementation.")
+        _MOCK_JUDGE_WARNING_SHOWN = True
 
-    if isinstance(scores[0], dict):
-        unpacked_scores = [s.get("math_equivalence", 0.0) for s in scores]
-        return sum(unpacked_scores) / len(unpacked_scores)
+    pred_clean = prediction.replace(" ", "").lower()
 
-    return sum(scores) / len(scores)
+    for sol in solutions:
+        gold_answer = str(sol.get("final-answer", "")).replace(" ", "").strip("$").lower()
+        if gold_answer and gold_answer in pred_clean:
+            return True
+
+    return False
+
+
+class LLMJudgeEquivalence(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response: ModelResponse, **kwargs: Any) -> Dict[str, float]:
+        if not model_response.final_text:
+            return {"llm_judge_score": 0.0}
+
+        if doc.specific is None or "solutions" not in doc.specific:
+            logger.debug("Formatted doc is missing the specific solutions array.")
+            return {"llm_judge_score": 0.0}
+
+        prediction = model_response.final_text[0]
+        solutions: List[Any] = doc.specific["solutions"]
+
+        if not solutions:
+            return {"llm_judge_score": 0.0}
+
+        first_sol = solutions[0]
+        steps = first_sol.get("steps", [])
+
+        if steps:
+            max_points = float(sum(step.get("points", 0) for step in steps))
+        else:
+            max_points = float(first_sol.get("points", 1.0))
+
+        is_correct = mock_llm_judge(doc.query, prediction, solutions)
+        score = max_points if is_correct else 0.0
+
+        return {"llm_judge_score": score}
 
 
 def aggregate_exact_match_scores(scores: List[Any]) -> float:
     if not scores:
         return 0.0
-
     if isinstance(scores[0], dict):
         unpacked_scores = [s.get("exact_match", 0.0) for s in scores]
         return sum(unpacked_scores) / len(unpacked_scores)
-
     return sum(scores) / len(scores)
 
 
-hungarian_math_metric: SampleLevelMetric = SampleLevelMetric(
-    metric_name="hungarian_math_final_answer",
-    higher_is_better=True,
-    category=SamplingMethod.GENERATIVE,
-    sample_level_fn=HungarianMathEquivalence(),
-    corpus_level_fn=aggregate_scores,
-)
+def aggregate_judge_scores(scores: List[Any]) -> float:
+    if not scores:
+        return 0.0
+    if isinstance(scores[0], dict):
+        unpacked_scores = [s.get("llm_judge_score", 0.0) for s in scores]
+        return sum(unpacked_scores) / len(unpacked_scores)
+    return sum(scores) / len(scores)
+
 
 physics_mc_metric: SampleLevelMetric = SampleLevelMetric(
     metric_name="physics_multiple_choice_accuracy",
@@ -283,6 +290,14 @@ physics_mc_metric: SampleLevelMetric = SampleLevelMetric(
     category=SamplingMethod.GENERATIVE,
     sample_level_fn=PhysicsMultipleChoiceMatch(),
     corpus_level_fn=aggregate_exact_match_scores,
+)
+
+llm_judge_metric: SampleLevelMetric = SampleLevelMetric(
+    metric_name="llm_judge_score",
+    higher_is_better=True,
+    category=SamplingMethod.GENERATIVE,
+    sample_level_fn=LLMJudgeEquivalence(),
+    corpus_level_fn=aggregate_judge_scores,
 )
 
 _PROMPT_FNS: Dict[str, Callable[[Dict[str, Any], str], Doc]] = {
@@ -299,7 +314,8 @@ try:
     _discovered_files = discover_local_datasets(_DATA_DIR)
     _discovered_files = preprocess_datasets(_discovered_files)
 except NotADirectoryError:
-    logger.warning("Data directory %s not found. Tasks will be registered without local files.", _DATA_DIR)
+    logger.warning("Data directory %s not found. Tasks will be registered without local files.",
+                   _DATA_DIR)
     _discovered_files = {}
 
 for task_key, all_files_for_subset in _discovered_files.items():
@@ -311,7 +327,8 @@ for task_key, all_files_for_subset in _discovered_files.items():
 
     prompt_fn = _PROMPT_FNS.get(subject, math_prompt_fn)
 
-    task_metrics: List[Any] = [physics_mc_metric] if subject == "physics_part1" else [hungarian_math_metric]
+    task_metrics: List[Any] = ([physics_mc_metric]
+                               if subject == "physics_part1" else [llm_judge_metric])
 
     TASKS_TABLE.append(
         LightevalTaskConfig(
