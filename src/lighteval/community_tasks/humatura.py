@@ -5,6 +5,8 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib import request
+from urllib.request import Request
 
 from lighteval.metrics.metrics_sample import SampleLevelComputation
 from lighteval.metrics.utils.metric_utils import SampleLevelMetric
@@ -221,11 +223,10 @@ class PhysicsMultipleChoiceMatch(SampleLevelComputation):
         return {"exact_match": score}
 
 
-def mock_llm_judge(query: str, prediction: str, solutions: List[Any]) -> bool:
+def fallback_mock_judge(prediction: str, solutions: List[Any]) -> bool:
     global _MOCK_JUDGE_WARNING_SHOWN
     if not _MOCK_JUDGE_WARNING_SHOWN:
-        logger.warning("Using MOCK LLM Judge. "
-                       "Replace mock_llm_judge with actual LLM implementation.")
+        logger.warning("JUDGE_API_KEY is not set. Falling back to local substring matching.")
         _MOCK_JUDGE_WARNING_SHOWN = True
 
     pred_clean = prediction.replace(" ", "").lower()
@@ -236,6 +237,75 @@ def mock_llm_judge(query: str, prediction: str, solutions: List[Any]) -> bool:
             return True
 
     return False
+
+def call_llm_judge(query: str, prediction: str, solutions: List[Any]) -> bool:
+    api_key = os.environ.get("JUDGE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    api_url = os.environ.get("JUDGE_API_URL", "https://api.openai.com/v1/chat/completions")
+    model_name = os.environ.get("JUDGE_MODEL", "gpt-4o-mini")
+
+    if not api_key:
+        return fallback_mock_judge(prediction, solutions)
+
+    formatted_solutions = ""
+    for idx, sol in enumerate(solutions, 1):
+        final_ans = sol.get("final-answer", "")
+        steps = sol.get("steps", [])
+        steps_text = "\n".join(f"- {step.get("step-description", "")}" for step in steps)
+        formatted_solutions += (f"Option {idx}:\n  Final Answer: {final_ans}\n  "
+                                f"Steps:\n{steps_text}\n\n")
+
+    prompt = (
+        "You are an expert academic grader. Your task is to grade a student's answer to a mathematical or physics question.\n\n"
+        f"Question:\n{query}\n\n"
+        f"Reference Solution(s):\n{formatted_solutions}\n"
+        f"Student's Answer:\n{prediction}\n\n"
+        "Determine if the student's final answer is correct and mathematically/physically equivalent to any of the reference solutions.\n"
+        "Ignore step-by-step reasoning or calculation differences as long as the final conclusion/result is correct.\n\n"
+        "Response format:\n"
+        "Respond in exactly the following JSON format:\n"
+        "{\n"
+        '    "correct": true,\n'
+        '    "explanation": "Brief explanation of your grading decision"\n'
+        "}\n"
+        "Do not include any other markdown formatting, code block markers, or text outside of the JSON block."
+    )
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.0
+    }
+
+    try:
+        req = Request(api_url,
+                      data=json.dumps(payload).encode("utf-8"),
+                      headers=headers,
+                      method="POST")
+
+        with request.urlopen(req, timeout=30) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            content = res_data["choices"][0]["message"]["content"].strip()
+
+            if content.startswith("```"):
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                content = "\n".join(lines).strip()
+
+            result = json.loads(content)
+            return bool(result.get("correct", False))
+    except Exception as error:
+        logger.error("LLM Judge API call failed: %s. Falling back to local heuristics.", error)
+        return fallback_mock_judge(prediction, solutions)
 
 
 class LLMJudgeEquivalence(SampleLevelComputation):
@@ -261,7 +331,7 @@ class LLMJudgeEquivalence(SampleLevelComputation):
         else:
             max_points = float(first_sol.get("points", 1.0))
 
-        is_correct = mock_llm_judge(doc.query, prediction, solutions)
+        is_correct = call_llm_judge(doc.query, prediction, solutions)
         score = max_points if is_correct else 0.0
 
         return {"llm_judge_score": score}
