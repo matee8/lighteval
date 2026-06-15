@@ -18,23 +18,40 @@ def discover_local_datasets(data_dir: Path) -> Dict[str, List[str]]:
     if not data_dir.is_dir():
         raise NotADirectoryError(f"Dataset directory does not exist or is not a directory: {data_dir}")
 
-    data_files: Dict[str, List[str]] = {"emelt": [], "kozep": []}
+    data_files: Dict[str, List[str]] = {}
 
     for file_path in data_dir.glob("*.json"):
         file_name = file_path.stem.lower()
         if "emelt" in file_name:
-            data_files["emelt"].append(str(file_path.absolute()))
-        elif "közép" in file_name:
-            data_files["kozep"].append(str(file_path.absolute()))
+            level = "advanced"
+        elif "közép" in file_name or "kozep" in file_name:
+            level = "standard"
         else:
-            logger.warning("File %s does not match emelt or kozep subsets. Skipping.", file_path)
+            logger.warning("File %s missing level (emelt/közép). Skipping.", file_path)
+            continue
 
-    # Since I create the datasets earlier, it could be left empty, which is not compatible with
-    # LightEval.
-    data_files = {subset: paths for subset, paths in data_files.items() if paths}
+        if "matematika" in file_name or "matek" in file_name:
+            subject = "math"
+        elif "fizika" in file_name:
+            if "első" in file_name or "elso" in file_name:
+                subject = "physics_part1"
+            elif "második" in file_name or "masodik" in file_name:
+                subject = "physics_part2"
+            else:
+                logger.warning("Physics file %s missing part (első/második). Skipping.", file_path)
+                continue
+        else:
+            logger.warning("File %s missing subject (matematika/fizika). Skipping.", file_path)
+            continue
+
+        key = f"{subject}_{level}"
+        if key not in data_files:
+            data_files[key] = []
+
+        data_files[key].append(str(file_path.absolute()))
 
     if not data_files:
-        logger.warning("No emelt or kozep JSON dataset files found in %s.", data_dir)
+        logger.warning("No valid dataset files found in %s.", data_dir)
 
     return data_files
 
@@ -138,17 +155,18 @@ try:
     _discovered_files = discover_local_datasets(_DATA_DIR)
 except NotADirectoryError:
     logger.warning("Data directory %s not found. Tasks will be registered without local files.", _DATA_DIR)
-    _discovered_files = {"emelt": [], "kozep": []}
+    _discovered_files = {}
 
-for subset in ["emelt", "kozep"]:
-    all_files_for_subset = _discovered_files.get(subset, [])
-
+for task_key, all_files_for_subset in _discovered_files.items():
     if not all_files_for_subset:
         continue
 
+    subject, level = task_key.rsplit("_", 1)
+    task_name = f"humatura:{subject}:{level}"
+
     TASKS_TABLE.append(
         LightevalTaskConfig(
-            name=f"humatura:{subset}",
+            name=task_name,
             prompt_function=hungarian_math_prompt_fn,
             hf_repo="json",
             hf_subset="default",
