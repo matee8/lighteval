@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +58,50 @@ def discover_local_datasets(data_dir: Path) -> Dict[str, List[str]]:
     return data_files
 
 
+def preprocess_datasets(data_files: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    preprocessed_files: Dict[str, List[str]] = {}
+
+    temp_dir = Path(tempfile.gettempdir()) / "humatura_preprocessed"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    for task_key, file_paths in data_files.items():
+        preprocessed_files[task_key] = []
+        for file_path in file_paths:
+            with open(file_path, "r", encoding="utf-8") as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse JSON from %s.", file_path)
+                    continue
+
+            merged_tasks: Dict[str, Any] = {}
+            for item in data:
+                if item.get("skipped"):
+                    continue
+
+                task_id = item.get("task")
+                if not task_id:
+                    logger.warning("Item missing 'task' key in %s. Skipping.", file_path)
+                    continue
+
+                if task_id not in merged_tasks:
+                    merged_item = item.copy()
+
+                    merged_item["solutions"] = [item["solution"]]
+                    merged_item.pop("solution", None)
+                    merged_tasks[task_id] = merged_item
+                else:
+                    merged_tasks[task_id]["solutions"].append(item["solution"])
+
+            out_path = temp_dir / f"{Path(file_path).stem}_preprocessed.json"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(list(merged_tasks.values()), f, ensure_ascii=False, indent=2)
+
+            preprocessed_files[task_key].append(str(out_path.absolute()))
+
+    return preprocessed_files
+
+
 def hungarian_math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     instruction = (
         "Kérlek, oldd meg a következő matematikai feladatot. "
@@ -64,15 +110,18 @@ def hungarian_math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
         "(például \\boxed{42} vagy \\boxed{x=3})."
     )
 
-    description: str = line["description"]
+    description: str = line.get("description", "")
     query = f"{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n"
+
+    first_solution = line["solutions"][0]
+    solution_obj = first_solution.get("solution", first_solution)
 
     return Doc(
         task_name=task_name,
         query=query,
         choices=[],
         gold_index=[],
-        specific={"solution": line["solution"]["solution"]},
+        specific={"solution": solution_obj},
     )
 
 
@@ -153,6 +202,7 @@ _DATA_DIR = Path(os.environ.get("HUMATURA_DATA_DIR", "./data"))
 
 try:
     _discovered_files = discover_local_datasets(_DATA_DIR)
+    _discovered_files = preprocess_datasets(_discovered_files)
 except NotADirectoryError:
     logger.warning("Data directory %s not found. Tasks will be registered without local files.", _DATA_DIR)
     _discovered_files = {}
