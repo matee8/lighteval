@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 import os
@@ -300,10 +301,16 @@ llm_judge_metric: SampleLevelMetric = SampleLevelMetric(
     corpus_level_fn=aggregate_judge_scores,
 )
 
-_PROMPT_FNS: Dict[str, Callable[[Dict[str, Any], str], Doc]] = {
-    "math": math_prompt_fn,
-    "physics_part1": physics_part1_prompt_fn,
-    "physics_part2": physics_part2_prompt_fn,
+@dataclasses.dataclass
+class SubjectTemplate:
+    prompt_fn: Callable[[Dict[str, Any], str], Doc]
+    metrics: List[Any]
+
+
+_SUBJECT_TEMPLATES: Dict[str, SubjectTemplate] = {
+    "math": SubjectTemplate(prompt_fn=math_prompt_fn, metrics=[llm_judge_metric]),
+    "physics_part1": SubjectTemplate(prompt_fn=physics_part1_prompt_fn, metrics=[physics_mc_metric]),
+    "physics_part2": SubjectTemplate(prompt_fn=physics_part2_prompt_fn, metrics=[llm_judge_metric]),
 }
 
 TASKS_TABLE: List[LightevalTaskConfig] = []
@@ -323,22 +330,24 @@ for task_key, all_files_for_subset in _discovered_files.items():
         continue
 
     subject, level = task_key.rsplit("_", 1)
+
+    template = _SUBJECT_TEMPLATES.get(subject)
+    if not template:
+        logger.warning("No configuration template found for subject %s. Skipping.", subject)
+        continue
+
     task_name = f"humatura:{subject}:{level}"
 
-    prompt_fn = _PROMPT_FNS.get(subject, math_prompt_fn)
-
-    task_metrics: List[Any] = ([physics_mc_metric]
-                               if subject == "physics_part1" else [llm_judge_metric])
 
     TASKS_TABLE.append(
         LightevalTaskConfig(
             name=task_name,
-            prompt_function=prompt_fn,
+            prompt_function=template.prompt_fn,
             hf_repo="json",
             hf_subset="default",
             hf_data_files={"validation": all_files_for_subset},
             hf_avail_splits=["validation"],
             evaluation_splits=["validation"],
-            metrics=task_metrics,
+            metrics=template.metrics,
         )
     )
