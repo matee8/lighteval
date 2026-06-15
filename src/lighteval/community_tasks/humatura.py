@@ -223,6 +223,30 @@ class HungarianMathEquivalence(SampleLevelComputation):
         return {"math_equivalence": score}
 
 
+class PhysicsMultipleChoiceMatch(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response: ModelResponse, **kwargs: Any) -> Dict[str, float]:
+        if not model_response.final_text:
+            return {"exact_match": 0.0}
+
+        if doc.specific is None or "correct_answer" not in doc.specific:
+            logger.debug("Formatted doc is missing the specific correct_answer field.")
+            return {"exact_match": 0.0}
+
+        prediction = model_response.final_text[0]
+        extracted_pred = extract_boxed_answer(prediction)
+
+        if extracted_pred is None:
+            logger.debug("Failed to extract boxed answer from multiple choice prediction.")
+            return {"exact_match": 0.0}
+
+        gold_answer: str = str(doc.specific["correct_answer"]).strip().upper()
+        pred_clean: str = extracted_pred.strip().upper()
+
+        score: float = 1.0 if pred_clean == gold_answer else 0.0
+
+        return {"exact_match": score}
+
+
 def aggregate_scores(scores: List[Any]) -> float:
     if not scores:
         return 0.0
@@ -234,12 +258,31 @@ def aggregate_scores(scores: List[Any]) -> float:
     return sum(scores) / len(scores)
 
 
+def aggregate_exact_match_scores(scores: List[Any]) -> float:
+    if not scores:
+        return 0.0
+
+    if isinstance(scores[0], dict):
+        unpacked_scores = [s.get("exact_match", 0.0) for s in scores]
+        return sum(unpacked_scores) / len(unpacked_scores)
+
+    return sum(scores) / len(scores)
+
+
 hungarian_math_metric: SampleLevelMetric = SampleLevelMetric(
     metric_name="hungarian_math_final_answer",
     higher_is_better=True,
     category=SamplingMethod.GENERATIVE,
     sample_level_fn=HungarianMathEquivalence(),
     corpus_level_fn=aggregate_scores,
+)
+
+physics_mc_metric: SampleLevelMetric = SampleLevelMetric(
+    metric_name="physics_multiple_choice_accuracy",
+    higher_is_better=True,
+    category=SamplingMethod.GENERATIVE,
+    sample_level_fn=PhysicsMultipleChoiceMatch(),
+    corpus_level_fn=aggregate_exact_match_scores,
 )
 
 _PROMPT_FNS: Dict[str, Callable[[Dict[str, Any], str], Doc]] = {
@@ -268,6 +311,8 @@ for task_key, all_files_for_subset in _discovered_files.items():
 
     prompt_fn = _PROMPT_FNS.get(subject, math_prompt_fn)
 
+    task_metrics: List[Any] = [physics_mc_metric] if subject == "physics_part1" else [hungarian_math_metric]
+
     TASKS_TABLE.append(
         LightevalTaskConfig(
             name=task_name,
@@ -277,6 +322,6 @@ for task_key, all_files_for_subset in _discovered_files.items():
             hf_data_files={"validation": all_files_for_subset},
             hf_avail_splits=["validation"],
             evaluation_splits=["validation"],
-            metrics=[hungarian_math_metric],
+            metrics=task_metrics,
         )
     )
