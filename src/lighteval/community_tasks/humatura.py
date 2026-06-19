@@ -2,8 +2,6 @@ import dataclasses
 import json
 import logging
 import os
-import tempfile
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib import request
 from urllib.request import Request
@@ -21,91 +19,14 @@ __all__ = ["TASKS_TABLE"]
 _MOCK_JUDGE_WARNING_SHOWN = False
 
 
-def discover_local_datasets(data_dir: Path) -> Dict[str, List[str]]:
-    if not data_dir.is_dir():
-        raise NotADirectoryError("Dataset directory does not exist or is not a directory: "
-                                 f"{data_dir}")
-
-    data_files: Dict[str, List[str]] = {}
-
-    for file_path in data_dir.glob("*.json"):
-        file_name = file_path.stem.lower()
-        if "emelt" in file_name:
-            level = "advanced"
-        elif "közép" in file_name or "kozep" in file_name:
-            level = "standard"
-        else:
-            logger.warning("File %s missing level (emelt/közép). Skipping.", file_path)
-            continue
-
-        if "matematika" in file_name or "matek" in file_name:
-            subject = "math"
-        elif "fizika" in file_name:
-            if "első" in file_name or "elso" in file_name:
-                subject = "physics_part1"
-            elif "második" in file_name or "masodik" in file_name:
-                subject = "physics_part2"
-            else:
-                logger.warning("Physics file %s missing part (első/második). Skipping.", file_path)
-                continue
-        else:
-            logger.warning("File %s missing subject (matematika/fizika). Skipping.", file_path)
-            continue
-
-        key = f"{subject}_{level}"
-        if key not in data_files:
-            data_files[key] = []
-
-        data_files[key].append(str(file_path.absolute()))
-
-    if not data_files:
-        logger.warning("No valid dataset files found in %s.", data_dir)
-
-    return data_files
-
-
-def preprocess_datasets(data_files: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    preprocessed_files: Dict[str, List[str]] = {}
-
-    temp_dir = Path(tempfile.gettempdir()) / "humatura_preprocessed"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
-    for task_key, file_paths in data_files.items():
-        preprocessed_files[task_key] = []
-        for file_path in file_paths:
-            with open(file_path, "r", encoding="utf-8") as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError:
-                    logger.error("Failed to parse JSON from %s.", file_path)
-                    continue
-
-            merged_tasks: Dict[str, Any] = {}
-            for item in data:
-                if item.get("skipped"):
-                    continue
-
-                task_id = item.get("task")
-                if not task_id:
-                    logger.warning("Item missing 'task' key in %s. Skipping.", file_path)
-                    continue
-
-                if task_id not in merged_tasks:
-                    merged_item = item.copy()
-
-                    merged_item["solutions"] = [item["solution"]]
-                    merged_item.pop("solution", None)
-                    merged_tasks[task_id] = merged_item
-                else:
-                    merged_tasks[task_id]["solutions"].append(item["solution"])
-
-            out_path = temp_dir / f"{Path(file_path).stem}_preprocessed.json"
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(list(merged_tasks.values()), f, ensure_ascii=False, indent=2)
-
-            preprocessed_files[task_key].append(str(out_path.absolute()))
-
-    return preprocessed_files
+def _parse_solution_steps(steps_str: str) -> List[Dict[str, Any]]:
+    if not steps_str:
+        return []
+    try:
+        return json.loads(steps_str)
+    except json.JSONDecodeError:
+        logger.error("Failed to parse solution steps: %s.", steps_str)
+        return []
 
 
 def math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
@@ -119,7 +40,11 @@ def math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     description: str = line.get("description", "")
     query = f"{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n"
 
-    solutions = [sol.get("solution", sol) for sol in line.get("solutions", [])]
+    solutions = [{
+        "final-answer": line.get("final_answer", ""),
+        "steps": _parse_solution_steps(line.get("solution_steps", "")),
+        "points": line.get("point", 1.0)
+    }]
 
     return Doc(
         task_name=task_name,
@@ -130,7 +55,7 @@ def math_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     )
 
 
-def physics_part1_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
+def physics_multiple_choice_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     instruction = (
         "Kérlek, válaszolj a következő feleletválasztós fizika feladatra. "
         "A végső válaszod betűjelét (A, B, C vagy D) pontosan egy \\boxed{} formátumba írd be "
@@ -138,26 +63,18 @@ def physics_part1_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     )
 
     description: str = line.get("description", "")
-
-    first_solution = line.get("solutions", [{}])[0]
-    answers: Dict[str, str] = first_solution.get("answers", {})
-    correct_answer: str = first_solution.get("correct_answer", "")
-
-    choices_text = "\n".join(f"{letter}) {text}" for letter, text in answers.items())
-
-    query = (f"{instruction}\n\nFeladat:\n{description}\n\n"
-            f"Válaszlehetőségek:\n{choices_text}\n\nMegoldás:\n")
+    query = f"{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n"
 
     return Doc(
         task_name=task_name,
         query=query,
         choices=[],
         gold_index=[],
-        specific={"correct_answer": correct_answer},
+        specific={"correct_answer": line.get("final_answer", "")},
     )
 
 
-def physics_part2_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
+def physics_open_ended_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     instruction = (
         "Kérlek, oldd meg a következő fizika feladatot. "
         "Gondoljuk végig lépésről lépésre, részletesen, és add meg a végső választ."
@@ -166,7 +83,11 @@ def physics_part2_prompt_fn(line: Dict[str, Any], task_name: str = "") -> Doc:
     description: str = line.get("description", "")
     query = f"{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n"
 
-    solutions = [sol.get("solution", sol) for sol in line.get("solutions", [])]
+    solutions = [{
+        "final-answer": line.get("final_answer", ""),
+        "steps": _parse_solution_steps(line.get("solution_steps", "")),
+        "points": line.get("point", 1.0)
+    }]
 
     return Doc(
         task_name=task_name,
@@ -379,45 +300,23 @@ class SubjectTemplate:
 
 _SUBJECT_TEMPLATES: Dict[str, SubjectTemplate] = {
     "math": SubjectTemplate(prompt_fn=math_prompt_fn, metrics=[llm_judge_metric]),
-    "physics_part1": SubjectTemplate(prompt_fn=physics_part1_prompt_fn, metrics=[physics_mc_metric]),
-    "physics_part2": SubjectTemplate(prompt_fn=physics_part2_prompt_fn, metrics=[llm_judge_metric]),
+    "physics-multiple-choice": SubjectTemplate(prompt_fn=physics_multiple_choice_prompt_fn, metrics=[physics_mc_metric]),
+    "physics-open-ended": SubjectTemplate(prompt_fn=physics_open_ended_prompt_fn, metrics=[llm_judge_metric]),
 }
 
 TASKS_TABLE: List[LightevalTaskConfig] = []
 
-_DATA_DIR = Path(os.environ.get("HUMATURA_DATA_DIR", "./data"))
-
-try:
-    _discovered_files = discover_local_datasets(_DATA_DIR)
-    _discovered_files = preprocess_datasets(_discovered_files)
-except NotADirectoryError:
-    logger.warning("Data directory %s not found. Tasks will be registered without local files.",
-                   _DATA_DIR)
-    _discovered_files = {}
-
-for task_key, all_files_for_subset in _discovered_files.items():
-    if not all_files_for_subset:
-        continue
-
-    subject, level = task_key.rsplit("_", 1)
-
-    template = _SUBJECT_TEMPLATES.get(subject)
-    if not template:
-        logger.warning("No configuration template found for subject %s. Skipping.", subject)
-        continue
-
-    task_name = f"humatura:{subject}:{level}"
 
 
+for subset, template in _SUBJECT_TEMPLATES.items():
     TASKS_TABLE.append(
         LightevalTaskConfig(
-            name=task_name,
+            name=f"humatura:{subset}",
             prompt_function=template.prompt_fn,
-            hf_repo="json",
-            hf_subset="default",
-            hf_data_files={"validation": all_files_for_subset},
-            hf_avail_splits=["validation"],
-            evaluation_splits=["validation"],
+            hf_repo="NYTK/HuMatura",
+            hf_subset=subset,
+            hf_avail_splits=["train"],
+            evaluation_splits=["train"],
             metrics=template.metrics,
         )
     )
