@@ -51,8 +51,7 @@ def math_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
     )
 
 
-def physics_multiple_choice_prompt_fn(line: Dict[str, Any],
-                                      task_name: str = '') -> Doc:
+def physics_multiple_choice_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
     instruction = (
         'Kérlek, válaszolj a következő feleletválasztós fizika feladatra. '
         'A végső válaszod betűjelét (A, B, C vagy D) pontosan egy \\boxed{} formátumba írd be '
@@ -76,8 +75,7 @@ def physics_multiple_choice_prompt_fn(line: Dict[str, Any],
     )
 
 
-def physics_open_ended_prompt_fn(line: Dict[str, Any],
-                                 task_name: str = '') -> Doc:
+def physics_open_ended_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
     instruction = (
         'Kérlek, oldd meg a következő fizika feladatot. '
         'Gondoljuk végig lépésről lépésre, részletesen, és add meg a végső választ.'
@@ -101,14 +99,15 @@ def physics_open_ended_prompt_fn(line: Dict[str, Any],
     )
 
 
-def call_llm_judge(query: str, prediction: str,
-                   solutions: List[Dict[str, Any]]) -> bool:
+def call_llm_judge(query: str, prediction: str, solutions: List[Dict[str, Any]]) -> bool:
     api_key = os.environ.get('JUDGE_API_KEY') or os.environ.get('OPENAI_API_KEY')
     api_url = os.environ.get('JUDGE_API_URL')
     model_name = os.environ.get('JUDGE_MODEL', 'gpt-4o-mini')
 
     if not api_key:
-        raise ValueError('Missing API key. Please set either JUDGE_API_KEY or OPENAI_API_KEY.')
+        raise ValueError(
+            'Missing API key. Please set either JUDGE_API_KEY or OPENAI_API_KEY.'
+        )
 
     formatted_solutions = ''
     for idx, sol in enumerate(solutions, 1):
@@ -146,7 +145,22 @@ def call_llm_judge(query: str, prediction: str,
                                       api_key=api_key,
                                       api_base=api_url,
                                       temperature=0.0)
-        content = response.choices[0].message.content.strip()
+
+        if not isinstance(response, litellm.ModelResponse):
+            raise TypeError(
+                'Expected ModelResponse from LiteLLM, got streaming object instead.'
+            )
+
+        choices = response.choices
+        if not choices:
+            raise ValueError('LiteLLM returned an empty choices list.')
+
+        raw_content = choices[0].message.content
+        if raw_content is None:
+            raise ValueError(
+                'LiteLLM returned a response choice with no text content.')
+
+        content = raw_content.strip()
 
         if content.startswith('```'):
             lines = content.split('\n')
@@ -160,8 +174,7 @@ def call_llm_judge(query: str, prediction: str,
         return bool(result.get('correct', False))
     except (litellm.exceptions.APIError, json.JSONDecodeError, KeyError,
             IndexError, ValueError) as error:
-        raise RuntimeError(
-            f'LLM Judge evaluation failed via LiteLLM: {error}') from error
+        raise RuntimeError(f'LLM Judge evaluation failed via LiteLLM: {error}') from error
 
 
 class LLMJudgeEquivalence(SampleLevelComputation):
@@ -171,8 +184,7 @@ class LLMJudgeEquivalence(SampleLevelComputation):
             return {'llm_judge_score': 0.0}
 
         if doc.specific is None or 'solutions' not in doc.specific:
-            logger.debug(
-                'Formatted doc is missing the specific solutions array.')
+            logger.debug('Formatted doc is missing the specific solutions array.')
             return {'llm_judge_score': 0.0}
 
         prediction = model_response.final_text[0]
@@ -220,8 +232,7 @@ class SubjectTemplate:
 
 
 _SUBJECT_TEMPLATES: Dict[str, SubjectTemplate] = {
-    'math':
-        SubjectTemplate(prompt_fn=math_prompt_fn, metrics=[llm_judge_metric]),
+    'math': SubjectTemplate(prompt_fn=math_prompt_fn, metrics=[llm_judge_metric]),
     'physics-multiple-choice':
         SubjectTemplate(prompt_fn=physics_multiple_choice_prompt_fn, metrics=[llm_judge_metric]),
     'physics-open-ended':
