@@ -3,8 +3,8 @@ import json
 import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
-from urllib import request
-from urllib.request import Request
+
+import litellm
 
 from lighteval.metrics.metrics_sample import SampleLevelComputation
 from lighteval.metrics.utils.metric_utils import SampleLevelMetric
@@ -15,8 +15,6 @@ from lighteval.tasks.requests import Doc, SamplingMethod
 logger = logging.getLogger(__name__)
 
 __all__ = ['TASKS_TABLE']
-
-_MOCK_JUDGE_WARNING_SHOWN = False
 
 
 def _parse_solution_steps(steps_str: str) -> List[Dict[str, Any]]:
@@ -148,34 +146,17 @@ class PhysicsMultipleChoiceMatch(SampleLevelComputation):
         return {'exact_match': score}
 
 
-def fallback_mock_judge(prediction: str, solutions: List[Any]) -> bool:
-    global _MOCK_JUDGE_WARNING_SHOWN
-    if not _MOCK_JUDGE_WARNING_SHOWN:
-        logger.warning(
-            'JUDGE_API_KEY is not set. Falling back to local substring matching.'
-        )
-        _MOCK_JUDGE_WARNING_SHOWN = True
-
-    pred_clean = prediction.replace(' ', '').lower()
-
-    for sol in solutions:
-        gold_answer = str(sol.get('final-answer',
-                                  '')).replace(' ', '').strip('$').lower()
-        if gold_answer and gold_answer in pred_clean:
-            return True
-
-    return False
-
-
-def call_llm_judge(query: str, prediction: str, solutions: List[Any]) -> bool:
+def call_llm_judge(query: str, prediction: str,
+                   solutions: List[Dict[str, Any]]) -> bool:
     api_key = os.environ.get('JUDGE_API_KEY') or os.environ.get(
         'OPENAI_API_KEY')
-    api_url = os.environ.get('JUDGE_API_URL',
-                             'https://api.openai.com/v1/chat/completions')
+    api_url = os.environ.get('JUDGE_API_URL')
     model_name = os.environ.get('JUDGE_MODEL', 'gpt-4o-mini')
 
     if not api_key:
-        return fallback_mock_judge(prediction, solutions)
+        raise ValueError(
+            'Missing API key. Please set either JUDGE_API_KEY or OPENAI_API_KEY.'
+        )
 
     formatted_solutions = ''
     for idx, sol in enumerate(solutions, 1):
@@ -193,7 +174,7 @@ def call_llm_judge(query: str, prediction: str, solutions: List[Any]) -> bool:
         f'Question:\n{query}\n\n'
         f'Reference Solution(s):\n{formatted_solutions}\n'
         f"Student's Answer:\n{prediction}\n\n"
-        "Determine if the student's final answer is correct and mathematically/physically"
+        "Determine if the student's final answer is correct and mathematically/physically "
         'equivalent to any of the reference solutions.\n'
         'Ignore step-by-step reasoning or calculation differences as long as the final '
         'conclusion/result is correct.\n\n'
@@ -206,45 +187,30 @@ def call_llm_judge(query: str, prediction: str, solutions: List[Any]) -> bool:
         'Do not include any other markdown formatting, code block markers, or text outside of the '
         'JSON block.')
 
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {api_key}'
-    }
-
-    payload = {
-        'model': model_name,
-        'messages': [{
-            'role': 'user',
-            'content': prompt
-        }],
-        'temperature': 0.0
-    }
+    messages = [{'role': 'user', 'content': prompt}]
 
     try:
-        req = Request(api_url,
-                      data=json.dumps(payload).encode('utf-8'),
-                      headers=headers,
-                      method='POST')
+        response = litellm.completion(model=model_name,
+                                      messages=messages,
+                                      api_key=api_key,
+                                      api_base=api_url,
+                                      temperature=0.0)
+        content = response.choices[0].message.content.strip()
 
-        with request.urlopen(req, timeout=30) as response:
-            res_data = json.loads(response.read().decode('utf-8'))
-            content = res_data['choices'][0]['message']['content'].strip()
+        if content.startswith('```'):
+            lines = content.split('\n')
+            if lines[0].startswith('```'):
+                lines = lines[1:]
+            if lines[-1].startswith('```'):
+                lines = lines[:-1]
+            content = '\n'.join(lines).strip()
 
-            if content.startswith('```'):
-                lines = content.split('\n')
-                if lines[0].startswith('```'):
-                    lines = lines[1:]
-                if lines[-1].startswith('```'):
-                    lines = lines[:-1]
-                content = '\n'.join(lines).strip()
-
-            result = json.loads(content)
-            return bool(result.get('correct', False))
-    except Exception as error:
-        logger.error(
-            'LLM Judge API call failed: %s. Falling back to local heuristics.',
-            error)
-        return fallback_mock_judge(prediction, solutions)
+        result = json.loads(content)
+        return bool(result.get('correct', False))
+    except (litellm.exceptions.APIError, json.JSONDecodeError, KeyError,
+            IndexError, ValueError) as error:
+        raise RuntimeError(
+            f'LLM Judge evaluation failed via LiteLLM: {error}') from error
 
 
 class LLMJudgeEquivalence(SampleLevelComputation):
