@@ -2,7 +2,7 @@ import dataclasses
 import json
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 import litellm
 
@@ -61,12 +61,18 @@ def physics_multiple_choice_prompt_fn(line: Dict[str, Any],
     description: str = line.get('description', '')
     query = f'{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n'
 
+    solutions = [{
+        'final-answer': line.get('final_answer', ''),
+        'steps': _parse_solution_steps(line.get('solution_steps', '')),
+        'points': line.get('point', 1.0)
+    }]
+
     return Doc(
         task_name=task_name,
         query=query,
         choices=[],
         gold_index=[],
-        specific={'correct_answer': line.get('final_answer', '')},
+        specific={'solutions': solutions},
     )
 
 
@@ -95,75 +101,20 @@ def physics_open_ended_prompt_fn(line: Dict[str, Any],
     )
 
 
-def extract_boxed_answer(text: str) -> Optional[str]:
-    box_tag = '\\boxed{'
-    start_idx = text.find(box_tag)
-
-    if start_idx == -1:
-        return None
-
-    start_idx += len(box_tag)
-    brace_count = 1
-
-    for i in range(start_idx, len(text)):
-        if text[i] == '{':
-            brace_count += 1
-        elif text[i] == '}':
-            brace_count -= 1
-
-        if brace_count == 0:
-            return text[start_idx:i]
-
-    return None
-
-
-class PhysicsMultipleChoiceMatch(SampleLevelComputation):
-
-    def compute(self, doc: Doc, model_response: ModelResponse,
-                **kwargs: Any) -> Dict[str, float]:
-        if not model_response.final_text:
-            return {'exact_match': 0.0}
-
-        if doc.specific is None or 'correct_answer' not in doc.specific:
-            logger.debug(
-                'Formatted doc is missing the specific correct_answer field.')
-            return {'exact_match': 0.0}
-
-        prediction = model_response.final_text[0]
-        extracted_pred = extract_boxed_answer(prediction)
-
-        if extracted_pred is None:
-            logger.debug(
-                'Failed to extract boxed answer from multiple choice prediction.'
-            )
-            return {'exact_match': 0.0}
-
-        gold_answer: str = str(doc.specific['correct_answer']).strip().upper()
-        pred_clean: str = extracted_pred.strip().upper()
-
-        score: float = 1.0 if pred_clean == gold_answer else 0.0
-
-        return {'exact_match': score}
-
-
 def call_llm_judge(query: str, prediction: str,
                    solutions: List[Dict[str, Any]]) -> bool:
-    api_key = os.environ.get('JUDGE_API_KEY') or os.environ.get(
-        'OPENAI_API_KEY')
+    api_key = os.environ.get('JUDGE_API_KEY') or os.environ.get('OPENAI_API_KEY')
     api_url = os.environ.get('JUDGE_API_URL')
     model_name = os.environ.get('JUDGE_MODEL', 'gpt-4o-mini')
 
     if not api_key:
-        raise ValueError(
-            'Missing API key. Please set either JUDGE_API_KEY or OPENAI_API_KEY.'
-        )
+        raise ValueError('Missing API key. Please set either JUDGE_API_KEY or OPENAI_API_KEY.')
 
     formatted_solutions = ''
     for idx, sol in enumerate(solutions, 1):
         final_ans = sol.get('final-answer', '')
         steps = sol.get('steps', [])
-        steps_text = '\n'.join(
-            f"- {step.get('step-description', '')}" for step in steps)
+        steps_text = '\n'.join(f"- {step.get('step-description', '')}" for step in steps)
         formatted_solutions += (
             f'Option {idx}:\n  Final Answer: {final_ans}\n  '
             f'Steps:\n{steps_text}\n\n')
@@ -215,8 +166,7 @@ def call_llm_judge(query: str, prediction: str,
 
 class LLMJudgeEquivalence(SampleLevelComputation):
 
-    def compute(self, doc: Doc, model_response: ModelResponse,
-                **kwargs: Any) -> Dict[str, float]:
+    def compute(self, doc: Doc, model_response: ModelResponse, **kwargs: Any) -> Dict[str, float]:
         if not model_response.final_text:
             return {'llm_judge_score': 0.0}
 
@@ -245,15 +195,6 @@ class LLMJudgeEquivalence(SampleLevelComputation):
         return {'llm_judge_score': score}
 
 
-def aggregate_exact_match_scores(scores: List[Any]) -> float:
-    if not scores:
-        return 0.0
-    if isinstance(scores[0], dict):
-        unpacked_scores = [s.get('exact_match', 0.0) for s in scores]
-        return sum(unpacked_scores) / len(unpacked_scores)
-    return sum(scores) / len(scores)
-
-
 def aggregate_judge_scores(scores: List[Any]) -> float:
     if not scores:
         return 0.0
@@ -262,14 +203,6 @@ def aggregate_judge_scores(scores: List[Any]) -> float:
         return sum(unpacked_scores) / len(unpacked_scores)
     return sum(scores) / len(scores)
 
-
-physics_mc_metric: SampleLevelMetric = SampleLevelMetric(
-    metric_name='physics_multiple_choice_accuracy',
-    higher_is_better=True,
-    category=SamplingMethod.GENERATIVE,
-    sample_level_fn=PhysicsMultipleChoiceMatch(),
-    corpus_level_fn=aggregate_exact_match_scores,
-)
 
 llm_judge_metric: SampleLevelMetric = SampleLevelMetric(
     metric_name='llm_judge_score',
@@ -290,11 +223,9 @@ _SUBJECT_TEMPLATES: Dict[str, SubjectTemplate] = {
     'math':
         SubjectTemplate(prompt_fn=math_prompt_fn, metrics=[llm_judge_metric]),
     'physics-multiple-choice':
-        SubjectTemplate(prompt_fn=physics_multiple_choice_prompt_fn,
-                        metrics=[physics_mc_metric]),
+        SubjectTemplate(prompt_fn=physics_multiple_choice_prompt_fn, metrics=[llm_judge_metric]),
     'physics-open-ended':
-        SubjectTemplate(prompt_fn=physics_open_ended_prompt_fn,
-                        metrics=[llm_judge_metric]),
+        SubjectTemplate(prompt_fn=physics_open_ended_prompt_fn, metrics=[llm_judge_metric]),
 }
 
 TASKS_TABLE: List[LightevalTaskConfig] = []
