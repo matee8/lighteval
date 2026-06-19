@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 import litellm
 from PIL import Image
@@ -33,6 +33,17 @@ def _model_has_vision() -> bool:
     return False
 
 
+def _hf_filter_vision(line: Dict[str, Any]) -> bool:
+    description_images: List[Any] = line.get('description_images') or []
+    if description_images and not _model_has_vision():
+        logger.info(
+            'Filtering out sample %s containing images because the active model lacks vision.',
+            line.get('task', ''),
+        )
+        return False
+    return True
+
+
 def _parse_solution_steps(steps_str: str) -> List[Dict[str, Any]]:
     if not steps_str:
         return []
@@ -43,14 +54,8 @@ def _parse_solution_steps(steps_str: str) -> List[Dict[str, Any]]:
         return []
 
 
-def math_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Optional[Doc]:
+def math_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
     description_images: List[Image.Image] = line.get('description_images') or []
-
-    if description_images:
-        if not _model_has_vision():
-            logger.info('Skipping sample %s for task %s because model does not support vision.',
-                        line.get('task', ''), task_name)
-            return None
 
     instruction = ('Kérlek, oldd meg a következő matematikai feladatot. '
                    'Gondoljuk végig lépésről lépésre, részletesen. '
@@ -74,17 +79,8 @@ def math_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Optional[Doc]:
                images=description_images if description_images else None)
 
 
-def physics_multiple_choice_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Optional[Doc]:
+def physics_multiple_choice_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
     description_images: List[Image.Image] = line.get('description_images') or []
-
-    if description_images:
-        if not _model_has_vision():
-            logger.info(
-                'Skipping sample %s for task %s because model does not support vision.',
-                line.get('task', ''),
-                task_name,
-            )
-            return None
 
     instruction = (
         'Kérlek, válaszolj a következő feleletválasztós fizika feladatra. '
@@ -108,17 +104,8 @@ def physics_multiple_choice_prompt_fn(line: Dict[str, Any], task_name: str = '')
                images=description_images if description_images else None)
 
 
-def physics_open_ended_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Optional[Doc]:
+def physics_open_ended_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
     description_images: List[Image.Image] = line.get('description_images') or []
-
-    if description_images:
-        if not _model_has_vision():
-            logger.info(
-                'Skipping sample %s for task %s because model does not support vision.',
-                line.get('task', ''),
-                task_name,
-            )
-            return None
 
     instruction = ('Kérlek, oldd meg a következő fizika feladatot. '
                    'Gondoljuk végig lépésről lépésre, részletesen, és add meg a végső választ.')
@@ -264,7 +251,7 @@ llm_judge_metric: SampleLevelMetric = SampleLevelMetric(
 
 @dataclasses.dataclass
 class SubjectTemplate:
-    prompt_fn: Callable[[Dict[str, Any], str], Optional[Doc]]
+    prompt_fn: Callable[[Dict[str, Any], str], Doc]
     metrics: List[Any]
 
 
@@ -287,6 +274,7 @@ for subset, template in _SUBJECT_TEMPLATES.items():
             hf_repo='NYTK/HuMatura',
             hf_subset=subset,
             hf_avail_splits=['train'],
+            hf_filter=_hf_filter_vision,
             evaluation_splits=['train'],
             metrics=template.metrics,
         ))
