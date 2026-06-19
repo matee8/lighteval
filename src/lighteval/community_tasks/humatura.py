@@ -2,9 +2,11 @@ import dataclasses
 import json
 import logging
 import os
-from typing import Any, Callable, Dict, List
+import sys
+from typing import Any, Callable, Dict, List, Optional
 
 import litellm
+from PIL import Image
 
 from lighteval.metrics.metrics_sample import SampleLevelComputation
 from lighteval.metrics.utils.metric_utils import SampleLevelMetric
@@ -17,6 +19,20 @@ logger = logging.getLogger(__name__)
 __all__ = ['TASKS_TABLE']
 
 
+def _model_has_vision() -> bool:
+    eval_vision_env = os.environ.get('EVAL_VISION')
+    if eval_vision_env is not None:
+        return eval_vision_env.lower() in ('true', '1', 'yes')
+
+    for arg in sys.argv:
+        if 'pretrained=' in arg or 'model_name=' in arg or '--model' in arg:
+            if any(kw in arg.lower() for kw in ('vl', 'llava', 'paligemma', 'pixtral', 'vision',
+                                                'vlm', 'multimodal')):
+                return True
+
+    return False
+
+
 def _parse_solution_steps(steps_str: str) -> List[Dict[str, Any]]:
     if not steps_str:
         return []
@@ -27,7 +43,15 @@ def _parse_solution_steps(steps_str: str) -> List[Dict[str, Any]]:
         return []
 
 
-def math_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
+def math_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Optional[Doc]:
+    description_images: List[Image.Image] = line.get('description_images') or []
+
+    if description_images:
+        if not _model_has_vision():
+            logger.info('Skipping sample %s for task %s because model does not support vision.',
+                        line.get('task', ''), task_name)
+            return None
+
     instruction = ('Kérlek, oldd meg a következő matematikai feladatot. '
                    'Gondoljuk végig lépésről lépésre, részletesen. '
                    'A végső választ pontosan egy \\boxed{} formátumba írd be '
@@ -42,16 +66,26 @@ def math_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
         'points': line.get('point', 1.0)
     }]
 
-    return Doc(
-        task_name=task_name,
-        query=query,
-        choices=[],
-        gold_index=[],
-        specific={'solutions': solutions},
-    )
+    return Doc(task_name=task_name,
+               query=query,
+               choices=[],
+               gold_index=[],
+               specific={'solutions': solutions},
+               images=description_images if description_images else None)
 
 
-def physics_multiple_choice_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
+def physics_multiple_choice_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Optional[Doc]:
+    description_images: List[Image.Image] = line.get('description_images') or []
+
+    if description_images:
+        if not _model_has_vision():
+            logger.info(
+                'Skipping sample %s for task %s because model does not support vision.',
+                line.get('task', ''),
+                task_name,
+            )
+            return None
+
     instruction = (
         'Kérlek, válaszolj a következő feleletválasztós fizika feladatra. '
         'A végső válaszod betűjelét (A, B, C vagy D) pontosan egy \\boxed{} formátumba írd be '
@@ -66,20 +100,28 @@ def physics_multiple_choice_prompt_fn(line: Dict[str, Any], task_name: str = '')
         'points': line.get('point', 1.0)
     }]
 
-    return Doc(
-        task_name=task_name,
-        query=query,
-        choices=[],
-        gold_index=[],
-        specific={'solutions': solutions},
-    )
+    return Doc(task_name=task_name,
+               query=query,
+               choices=[],
+               gold_index=[],
+               specific={'solutions': solutions},
+               images=description_images if description_images else None)
 
 
-def physics_open_ended_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Doc:
-    instruction = (
-        'Kérlek, oldd meg a következő fizika feladatot. '
-        'Gondoljuk végig lépésről lépésre, részletesen, és add meg a végső választ.'
-    )
+def physics_open_ended_prompt_fn(line: Dict[str, Any], task_name: str = '') -> Optional[Doc]:
+    description_images: List[Image.Image] = line.get('description_images') or []
+
+    if description_images:
+        if not _model_has_vision():
+            logger.info(
+                'Skipping sample %s for task %s because model does not support vision.',
+                line.get('task', ''),
+                task_name,
+            )
+            return None
+
+    instruction = ('Kérlek, oldd meg a következő fizika feladatot. '
+                   'Gondoljuk végig lépésről lépésre, részletesen, és add meg a végső választ.')
 
     description: str = line.get('description', '')
     query = f'{instruction}\n\nFeladat:\n{description}\n\nMegoldás:\n'
@@ -96,6 +138,7 @@ def physics_open_ended_prompt_fn(line: Dict[str, Any], task_name: str = '') -> D
         choices=[],
         gold_index=[],
         specific={'solutions': solutions},
+        images=description_images if description_images else None,
     )
 
 
@@ -105,18 +148,15 @@ def call_llm_judge(query: str, prediction: str, solutions: List[Dict[str, Any]])
     model_name = os.environ.get('JUDGE_MODEL', 'gpt-4o-mini')
 
     if not api_key:
-        raise ValueError(
-            'Missing API key. Please set either JUDGE_API_KEY or OPENAI_API_KEY.'
-        )
+        raise ValueError('Missing API key. Please set either JUDGE_API_KEY or OPENAI_API_KEY.')
 
     formatted_solutions = ''
     for idx, sol in enumerate(solutions, 1):
         final_ans = sol.get('final-answer', '')
         steps = sol.get('steps', [])
         steps_text = '\n'.join(f"- {step.get('step-description', '')}" for step in steps)
-        formatted_solutions += (
-            f'Option {idx}:\n  Final Answer: {final_ans}\n  '
-            f'Steps:\n{steps_text}\n\n')
+        formatted_solutions += (f'Option {idx}:\n  Final Answer: {final_ans}\n  '
+                                f'Steps:\n{steps_text}\n\n')
 
     prompt = (
         "You are an expert academic grader. Your task is to grade a student's answer to a "
@@ -147,9 +187,7 @@ def call_llm_judge(query: str, prediction: str, solutions: List[Dict[str, Any]])
                                       temperature=0.0)
 
         if not isinstance(response, litellm.ModelResponse):
-            raise TypeError(
-                'Expected ModelResponse from LiteLLM, got streaming object instead.'
-            )
+            raise TypeError('Expected ModelResponse from LiteLLM, got streaming object instead.')
 
         choices = response.choices
         if not choices:
@@ -157,8 +195,7 @@ def call_llm_judge(query: str, prediction: str, solutions: List[Dict[str, Any]])
 
         raw_content = choices[0].message.content
         if raw_content is None:
-            raise ValueError(
-                'LiteLLM returned a response choice with no text content.')
+            raise ValueError('LiteLLM returned a response choice with no text content.')
 
         content = raw_content.strip()
 
@@ -172,8 +209,8 @@ def call_llm_judge(query: str, prediction: str, solutions: List[Dict[str, Any]])
 
         result = json.loads(content)
         return bool(result.get('correct', False))
-    except (litellm.exceptions.APIError, json.JSONDecodeError, KeyError,
-            IndexError, ValueError) as error:
+    except (litellm.exceptions.APIError, json.JSONDecodeError, KeyError, IndexError,
+            ValueError) as error:
         raise RuntimeError(f'LLM Judge evaluation failed via LiteLLM: {error}') from error
 
 
@@ -227,12 +264,13 @@ llm_judge_metric: SampleLevelMetric = SampleLevelMetric(
 
 @dataclasses.dataclass
 class SubjectTemplate:
-    prompt_fn: Callable[[Dict[str, Any], str], Doc]
+    prompt_fn: Callable[[Dict[str, Any], str], Optional[Doc]]
     metrics: List[Any]
 
 
 _SUBJECT_TEMPLATES: Dict[str, SubjectTemplate] = {
-    'math': SubjectTemplate(prompt_fn=math_prompt_fn, metrics=[llm_judge_metric]),
+    'math':
+        SubjectTemplate(prompt_fn=math_prompt_fn, metrics=[llm_judge_metric]),
     'physics-multiple-choice':
         SubjectTemplate(prompt_fn=physics_multiple_choice_prompt_fn, metrics=[llm_judge_metric]),
     'physics-open-ended':
